@@ -44,6 +44,7 @@ class CodeExecutor:
         os.makedirs(self.output_dir, exist_ok=True)
         
         # 初始化 IPython shell
+        # 初始化并获取 IPython 交互式 shell 的单例实例，以便在程序中嵌入 IPython 的交互式功能（如执行代码、处理输入输出、支持魔法命令等）
         self.shell = InteractiveShell.instance()
         
         # 设置中文字体
@@ -96,31 +97,46 @@ from IPython.display import display
     
     def _check_code_safety(self, code: str) -> Tuple[bool, str]:
         """
-        检查代码安全性，限制导入的库
+        检查代码安全性，限制导入的库和危险函数调用，防止执行恶意代码或不安全操作
         
         Returns:
-            (is_safe, error_message)
+            (is_safe, error_message): 元组，第一个元素为布尔值（True表示安全，False表示不安全），
+                                    第二个元素为错误信息（安全时为空字符串，不安全时说明具体原因）
         """
         try:
+            # 将输入的代码字符串解析为抽象语法树（AST），用于后续分析代码结构
+            # AST是代码的结构化表示，可通过遍历节点判断代码是否包含危险操作
             tree = ast.parse(code)
         except SyntaxError as e:
+            # 如果代码存在语法错误（如拼写错误、语法不完整），直接返回不安全及错误信息
             return False, f"语法错误: {e}"
         
+        # 遍历AST中的所有节点（递归访问所有子节点），检查是否存在不安全操作
         for node in ast.walk(tree):
+            # 1. 检查"直接导入"语句（如 import os, import requests）
             if isinstance(node, ast.Import):
+                # 遍历导入的每个库别名（如 import os as o 中的 'os'）
                 for alias in node.names:
+                    # 如果导入的库不在允许的列表（self.ALLOWED_IMPORTS）中，判定为不安全
                     if alias.name not in self.ALLOWED_IMPORTS:
                         return False, f"不允许的导入: {alias.name}"
             
+            # 2. 检查"从模块导入"语句（如 from os import path, from subprocess import call）
             elif isinstance(node, ast.ImportFrom):
+                # 检查导入的模块名（如 from os import ... 中的 'os'）是否在允许列表中
                 if node.module not in self.ALLOWED_IMPORTS:
                     return False, f"不允许的导入: {node.module}"
-              # 检查危险函数调用
+            
+            # 3. 检查危险函数调用（可能执行任意代码或绕过限制的函数）
             elif isinstance(node, ast.Call):
+                # 判断函数调用的是否是直接通过名称调用的函数（如 exec("code") 中的 'exec'）
                 if isinstance(node.func, ast.Name):
+                    # 禁止调用 exec（执行字符串为代码）、eval（计算表达式为代码）、__import__（动态导入模块）
+                    # 这些函数可能被用于执行未授权操作或导入危险库
                     if node.func.id in ['exec', 'eval', '__import__']:
                         return False, f"不允许的函数调用: {node.func.id}"
         
+        # 所有节点检查通过，代码安全
         return True, ""
     
     def get_current_figures_info(self) -> List[Dict[str, Any]]:
@@ -260,34 +276,58 @@ from IPython.display import display
         self.shell.user_ns[name] = value
     
     def get_environment_info(self) -> str:
-        """获取当前执行环境的变量信息，用于系统提示词"""
+        """获取当前执行环境的变量信息，用于系统提示词
+        功能：收集用户当前交互环境中的关键变量（如数据结构、路径、导入的库等），
+            整理成结构化文本，帮助系统提示词了解当前环境状态，辅助后续操作（如代码生成、数据处理）
+        返回：包含环境变量信息的字符串
+        """
+        # 用于存储环境信息的片段，最后拼接成完整字符串
         info_parts = []
         
-        # 获取重要的数据变量
+        # 存储需要收集的重要变量信息（键：变量名，值：变量的简化描述）
         important_vars = {}
+        
+        # 遍历IPython shell的用户命名空间（self.shell.user_ns包含用户定义的所有变量）
         for var_name, var_value in self.shell.user_ns.items():
+            # 过滤条件：
+            # 1. 排除以下划线开头的变量（通常是临时变量或内部变量）
+            # 2. 排除IPython内置变量（如In/Out是输入输出历史，get_ipython等是shell工具）
             if not var_name.startswith('_') and var_name not in ['In', 'Out', 'get_ipython', 'exit', 'quit']:
                 try:
-                    if hasattr(var_value, 'shape'):  # pandas DataFrame, numpy array
+                    # 处理有shape属性的变量（如pandas DataFrame、numpy数组等数据结构）
+                    if hasattr(var_value, 'shape'):
+                        # 记录变量类型（如DataFrame、ndarray）和形状（如(100,5)表示100行5列）
                         important_vars[var_name] = f"{type(var_value).__name__} with shape {var_value.shape}"
-                    elif var_name in ['session_output_dir']:  # 重要的路径变量
-                        important_vars[var_name] = str(var_value)
+                    
+                    # 特殊处理重要的路径变量（如session_output_dir，通常用于存储输出文件）
+                    elif var_name in ['session_output_dir']:
+                        important_vars[var_name] = str(var_value)  # 直接记录路径字符串
+                    
+                    # 处理基本数据类型（int/float/str/bool）且值较短的变量（避免过长文本占用空间）
                     elif isinstance(var_value, (int, float, str, bool)) and len(str(var_value)) < 100:
-                        important_vars[var_name] = f"{type(var_value).__name__}: {var_value}"
+                        important_vars[var_name] = f"{type(var_value).__name__}: {var_value}"  # 记录类型和值
+                    
+                    # 处理特定库的导入对象（如pandas/numpy/matplotlib的模块或实例）
                     elif hasattr(var_value, '__module__') and var_value.__module__ in ['pandas', 'numpy', 'matplotlib.pyplot']:
-                        important_vars[var_name] = f"导入的模块: {var_value.__module__}"
+                        important_vars[var_name] = f"导入的模块: {var_value.__module__}"  # 记录所属模块
+                
+                # 捕获变量处理中的异常（如某些对象的shape属性访问可能报错），跳过当前变量
                 except:
                     continue
         
+        # 如果收集到重要变量，将其格式化添加到信息片段
         if important_vars:
-            info_parts.append("当前环境变量:")
+            info_parts.append("当前环境变量:")  # 添加标题
+            # 遍历变量，按格式添加到列表（如"- 变量名: 描述"）
             for var_name, var_info in important_vars.items():
                 info_parts.append(f"- {var_name}: {var_info}")
+        # 如果没有重要变量，说明环境中可能只有预装库
         else:
             info_parts.append("当前环境已预装pandas, numpy, matplotlib等库")
         
-        # 添加输出目录信息
+        # 单独补充输出目录信息（如果存在），方便系统知道图片等文件的保存路径
         if 'session_output_dir' in self.shell.user_ns:
             info_parts.append(f"图片保存目录: session_output_dir = '{self.shell.user_ns['session_output_dir']}'")
         
+        # 将所有信息片段用换行符拼接成完整字符串并返回
         return "\n".join(info_parts)

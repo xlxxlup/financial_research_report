@@ -15,7 +15,7 @@ def get_stock_intro(symbol: str = "000066", market: Literal["A", "HK"] = "A") ->
         # 去掉A股代码的SH/SZ前缀
         clean_symbol = symbol.replace('SH', '').replace('SZ', '')
         try:
-            df = ak.stock_zyjs_ths(symbol=clean_symbol)
+            df = ak.stock_zyjs_ths(symbol=clean_symbol) # 该接口用于爬取同花顺网站上 上市公司的主要股东信息，包括股东名称、持股数量、持股比例、股份变动情况（增持 / 减持）、变动日期等，帮助分析公司的股权结构、大股东动向等
             if df is not None and not df.empty:
                 return df.to_string(index=False)
         except Exception as e:
